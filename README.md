@@ -37,6 +37,8 @@ guidance and chapter pause/completion messages are also described accessibly.
 Use the numbered shortcuts beneath the chapter list to revisit any question in
 the current chapter, or any of the three quick-reflection samples. Changing
 questions clears sample text; selecting the current question keeps it intact.
+Selecting the already-active session length also keeps your place and sample
+text. Use the completion screen's restart actions when you want to start over.
 At completion, you can restart, explore the full journey, or return to Welcome.
 Sample text and narration are also cleared when leaving or returning through
 browser history; browser form restoration must not bring an old response back.
@@ -76,6 +78,9 @@ automatic reading, plus numbered question navigation and completion actions.
 They traverse all 30 questions and four chapter pauses, exercise native browser
 Back/Forward, and check that typing and navigation create no response requests,
 browser storage, or cookies.
+Keyboard focus follows the selected question directly. Narrow-screen checks
+also cover doubled text sizes and keep the beginning of long questions and
+completion messages visible.
 Speech scheduling tests use a controlled browser speech
 stub; they do not verify audible playback.
 

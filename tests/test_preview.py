@@ -82,7 +82,9 @@ class PreviewTests(unittest.TestCase):
 
     def finish(self, quick):
         self.page.locator('#quick-mode' if quick else '#full-mode').click()
-        if not quick:
+        if quick:
+            self.page.locator('#question-list button').nth(0).click()
+        else:
             self.page.locator('.chapter-chip').nth(4).click()
         for _ in range(3 if quick else 6):
             self.page.locator('#next').click()
@@ -670,6 +672,100 @@ class PreviewTests(unittest.TestCase):
         self.assertFalse(any(
             sample in payload for sample in samples for payload in request_payloads
         ), 'Sample text must not be transmitted in request URLs or bodies')
+
+    def test_keyboard_chapter_jump_focuses_only_the_requested_question(self):
+        self.page.locator('#quick-mode').click()
+        self.page.evaluate('''() => {
+            window.focusedQuestions = [];
+            document.getElementById('chapter-question').addEventListener('focusin', event => {
+                window.focusedQuestions.push(event.target.textContent);
+            });
+        }''')
+        chapter = self.page.locator('.chapter-chip').nth(3)
+        chapter.focus()
+        chapter.press('Enter')
+        target = 'What gives life a sense of purpose?'
+        expect(self.page.locator('#chapter-question')).to_have_text(target)
+        expect(self.page.locator('#chapter-question')).to_be_focused()
+        expect(self.page.locator('#progress-label')).to_have_text(
+            'Question 19 of 30 · Chapter 4 of 5'
+        )
+        self.assertEqual(self.page.evaluate('window.focusedQuestions'), [target])
+
+    def test_reselecting_current_session_mode_preserves_the_current_experience(self):
+        for quick in (False, True):
+            mode = self.page.locator('#quick-mode' if quick else '#full-mode')
+            mode.click()
+            for key in ('Enter', 'Space'):
+                with self.subTest(quick=quick, key=key):
+                    self.page.locator('#question-list button').nth(2 if quick else 3).click()
+                    self.page.locator('#reflection').fill('Keep this mode sample')
+                    if self.page.locator('#optional-prompt').is_hidden():
+                        self.page.locator('#toggle-prompt').click()
+                    progress = self.page.locator('#progress-label').inner_text()
+                    mode.focus()
+                    mode.press(key)
+                    expect(self.page.locator('#progress-label')).to_have_text(progress)
+                    expect(self.page.locator('#reflection')).to_have_value('Keep this mode sample')
+                    expect(self.page.locator('#optional-prompt')).to_be_visible()
+        self.page.locator('#full-mode').click()
+        self.page.locator('.chapter-chip').nth(0).click()
+        self.page.locator('#question-list button').nth(5).click()
+        self.page.locator('#next').click()
+        with self.subTest(state='chapter pause'):
+            self.page.locator('#full-mode').press('Enter')
+            expect(self.page.locator('#rest-screen')).to_be_visible()
+            expect(self.page.locator('#question-panel')).to_be_hidden()
+        for quick in (False, True):
+            with self.subTest(state='completion', quick=quick):
+                self.finish(quick)
+                message = self.page.locator('#completion-message').inner_text()
+                self.page.locator('#quick-mode' if quick else '#full-mode').press('Space')
+                expect(self.page.locator('#session-complete')).to_be_visible()
+                expect(self.page.locator('#completion-message')).to_have_text(message)
+                expect(self.page.locator('#question-panel')).to_be_hidden()
+
+    def test_mobile_200_percent_text_reflows_and_keeps_reading_start_visible(self):
+        self.page.set_viewport_size({'width': 320, 'height': 740})
+        self.page.locator('#large-type').check()
+        # Snapshot first so inherited sizes are doubled once, rather than
+        # compounding ancestor/descendant changes. This models text enlargement,
+        # not a higher-resolution device screenshot or CSS zoom.
+        self.page.evaluate('''() => {
+            const originalSizes = Array.from(document.querySelectorAll('body, body *'),
+                element => [element, parseFloat(getComputedStyle(element).fontSize)]);
+            for (const [element, size] of originalSizes) {
+                element.style.fontSize = `${size * 2}px`;
+            }
+        }''')
+
+        def assert_no_horizontal_scroll():
+            self.assertLessEqual(
+                self.page.evaluate('document.documentElement.scrollWidth'), 320
+            )
+
+        def assert_reading_start_visible(selector):
+            self.page.wait_for_function('''selector => {
+                const bounds = document.querySelector(selector).getBoundingClientRect();
+                return bounds.top >= 0 && bounds.top < window.innerHeight;
+            }''', arg=selector)
+
+        for view in ('Welcome', 'Before You Begin', 'The Journey'):
+            with self.subTest(view=view):
+                self.navigate(view)
+                assert_no_horizontal_scroll()
+        self.page.locator('.chapter-chip').nth(4).click()
+        self.page.locator('#question-list button').nth(5).click()
+        with self.subTest(view='long final question'):
+            assert_no_horizontal_scroll()
+            expect(self.page.locator('#chapter-question')).to_be_focused()
+            assert_reading_start_visible('#chapter-question')
+        self.page.locator('#next').click()
+        with self.subTest(view='completion'):
+            assert_no_horizontal_scroll()
+            expect(self.page.locator('#session-complete')).to_be_focused()
+            assert_reading_start_visible('#session-complete')
+            assert_reading_start_visible('#completion-title')
 
 
 if __name__ == '__main__':
