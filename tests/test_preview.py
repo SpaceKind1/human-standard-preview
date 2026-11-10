@@ -4,10 +4,30 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+import os
 import re
+import shutil
 import unittest
 
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
+
+
+def chromium_launch_options():
+    """Use an explicit or system Chromium, falling back to Playwright's browser."""
+    override = os.environ.get('PREVIEW_BROWSER_EXECUTABLE')
+    if override:
+        executable = Path(override).expanduser()
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise RuntimeError(
+                'PREVIEW_BROWSER_EXECUTABLE must point to an executable Chromium '
+                f'browser: {override}'
+            )
+        return {'executable_path': str(executable.resolve()), 'headless': True}
+    for name in ('chromium', 'chromium-browser'):
+        executable = shutil.which(name)
+        if executable:
+            return {'executable_path': executable, 'headless': True}
+    return {'headless': True}
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -18,25 +38,28 @@ class QuietHandler(SimpleHTTPRequestHandler):
 class PreviewTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        launch_options = chromium_launch_options()
         root = Path(__file__).resolve().parents[1]
         cls.server = ThreadingHTTPServer(
             ('127.0.0.1', 0), partial(QuietHandler, directory=str(root))
         )
+        cls.addClassCleanup(cls.server.server_close)
         cls.server_thread = Thread(target=cls.server.serve_forever, daemon=True)
         cls.server_thread.start()
+        cls.addClassCleanup(cls.server_thread.join)
+        cls.addClassCleanup(cls.server.shutdown)
         cls.url = f'http://127.0.0.1:{cls.server.server_port}/'
         cls.playwright = sync_playwright().start()
-        cls.browser = cls.playwright.chromium.launch(
-            executable_path='/usr/bin/chromium', headless=True
-        )
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.browser.close()
-        cls.playwright.stop()
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.server_thread.join()
+        cls.addClassCleanup(cls.playwright.stop)
+        try:
+            cls.browser = cls.playwright.chromium.launch(**launch_options)
+        except PlaywrightError as error:
+            raise RuntimeError(
+                'Could not launch Chromium. Install a managed browser with '
+                '"python -m playwright install chromium", or set '
+                'PREVIEW_BROWSER_EXECUTABLE to an installed Chromium executable.'
+            ) from error
+        cls.addClassCleanup(cls.browser.close)
 
     def setUp(self):
         self.context = self.browser.new_context(reduced_motion='reduce')
@@ -449,6 +472,96 @@ class PreviewTests(unittest.TestCase):
         expect(self.page.locator('#question-list button').nth(0)).to_have_attribute(
             'aria-current', 'step'
         )
+
+    def test_document_history_does_not_restore_discarded_sample_text(self):
+        readme_url = self.url + 'README.md'
+        for direction in ('back', 'forward'):
+            with self.subTest(direction=direction):
+                if direction == 'forward':
+                    self.page.goto(readme_url)
+                    self.page.goto(self.url)
+                    self.navigate('The Journey')
+                self.page.locator('#reflection').fill('Temporary document history sample')
+                expect(self.page.locator('#word-hint')).to_contain_text('4 words typed')
+                if direction == 'back':
+                    self.page.goto(readme_url)
+                    self.page.go_back()
+                else:
+                    self.page.go_back()
+                    self.page.go_forward()
+                expect(self.page).to_have_url(self.url)
+                self.navigate('The Journey')
+                expect(self.page.locator('#reflection')).to_have_value('')
+                expect(self.page.locator('#word-hint')).to_have_text(
+                    '0 words typed · No minimum or maximum'
+                )
+
+    def test_page_lifecycle_cancels_active_and_pending_speech(self):
+        self.install_speech_recorder()
+        for event_name in ('pagehide', 'pageshow'):
+            for state in ('active', 'pending'):
+                with self.subTest(event=event_name, state=state):
+                    self.page.goto(self.url)
+                    self.navigate('The Journey')
+                    if state == 'active':
+                        self.page.locator('#read-question').click()
+                        self.page.evaluate('window.utterances.at(-1).onstart()')
+                    else:
+                        self.page.locator('#auto-read').check()
+                        self.page.locator('#next').click()
+                        self.assertEqual(self.page.evaluate('window.spoken.length'), 1)
+                    self.page.locator('#reflection').fill('Temporary lifecycle sample')
+                    expect(self.page.locator('#stop-reading')).to_be_enabled()
+                    cancel_count = self.page.evaluate('window.speechCancelCount')
+                    speech_count = self.page.evaluate('window.spoken.length')
+                    # Dispatch before document destruction so we can inspect the
+                    # handler and queued timer. Native Back/Forward is covered above.
+                    self.page.evaluate("""eventName => {
+                        window.dispatchEvent(new PageTransitionEvent(eventName, {
+                            persisted: true
+                        }));
+                    }""", event_name)
+                    expect(self.page.locator('#stop-reading')).to_be_disabled()
+                    self.assertGreater(self.page.evaluate('window.speechCancelCount'), cancel_count)
+                    expect(self.page.locator('#reflection')).to_have_value('')
+                    expect(self.page.locator('#word-hint')).to_have_text(
+                        '0 words typed · No minimum or maximum'
+                    )
+                    if state == 'pending':
+                        self.page.wait_for_timeout(750)
+                        self.assertEqual(self.page.evaluate('window.spoken.length'), speech_count)
+
+    def test_navigation_resets_cancelled_speech_status(self):
+        self.install_speech_recorder()
+        self.page.locator('#read-question').click()
+        self.page.evaluate('window.utterances.at(-1).onstart()')
+        expect(self.page.locator('#audio-status')).to_have_text('Reading aloud…')
+        self.navigate('Welcome')
+        self.navigate('The Journey')
+        expect(self.page.locator('#stop-reading')).to_be_disabled()
+        expect(self.page.locator('#audio-status')).to_have_text(
+            'Audio is optional. Use Read aloud if your browser supports it. Nothing is recorded.'
+        )
+
+    def test_mobile_chapter_introduction_has_visible_working_stop(self):
+        self.install_speech_recorder()
+        self.page.set_viewport_size({'width': 320, 'height': 740})
+        self.page.locator('#hear-chapter').click()
+        self.page.evaluate('window.utterances.at(-1).onstart()')
+        stop = self.page.locator('#stop-introduction')
+        expect(stop).to_be_visible()
+        expect(stop).to_be_enabled()
+        self.page.wait_for_function('''() => {
+            const bounds = document.getElementById('stop-introduction').getBoundingClientRect();
+            return bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+        }''')
+        cancel_count = self.page.evaluate('window.speechCancelCount')
+        stop.click()
+        self.assertGreater(self.page.evaluate('window.speechCancelCount'), cancel_count)
+        expect(stop).to_be_disabled()
+        expect(self.page.locator('#stop-reading')).to_be_disabled()
+        expect(self.page.locator('#audio-status')).to_have_text('Reading stopped.')
+
 
 if __name__ == '__main__':
     unittest.main()
