@@ -4,6 +4,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from urllib.parse import unquote_plus, urlsplit
 import os
 import re
 import shutil
@@ -561,6 +562,114 @@ class PreviewTests(unittest.TestCase):
         expect(stop).to_be_disabled()
         expect(self.page.locator('#stop-reading')).to_be_disabled()
         expect(self.page.locator('#audio-status')).to_have_text('Reading stopped.')
+
+    def test_complete_journey_visits_all_questions_and_four_chapter_pauses(self):
+        self.page.locator('#full-mode').click()
+        visited_questions = []
+        pauses = 0
+        for number in range(1, 31):
+            chapter = (number - 1) // 6 + 1
+            expect(self.page.locator('#progress-label')).to_have_text(
+                f'Question {number} of 30 · Chapter {chapter} of 5'
+            )
+            expect(self.page.locator('#question-count')).to_have_text(
+                f'Question {(number - 1) % 6 + 1} of 6'
+            )
+            question = self.page.locator('#chapter-question').inner_text().strip()
+            self.assertTrue(question, 'Each journey step must present a question')
+            visited_questions.append(question)
+            self.page.locator('#reflection').fill(f'Temporary sample {number}')
+            self.page.locator('#next' if number % 2 else '#skip').click()
+            expect(self.page.locator('#reflection')).to_have_value('')
+            expect(self.page.locator('#word-hint')).to_have_text(
+                '0 words typed · No minimum or maximum'
+            )
+            if number % 6 == 0 and number < 30:
+                pauses += 1
+                expect(self.page.locator('#rest-screen')).to_be_visible()
+                expect(self.page.locator('#rest-title')).to_have_text(
+                    f'Chapter {chapter} complete'
+                )
+                expect(self.page.locator('#question-panel')).to_be_hidden()
+                self.page.locator('#continue-chapter').click()
+                expect(self.page.locator('#rest-screen')).to_be_hidden()
+                expect(self.page.locator('#chapter-question')).to_be_focused()
+        self.assertEqual(pauses, 4)
+        self.assertEqual(len(set(visited_questions)), 30)
+        expect(self.page.locator('#session-complete')).to_be_visible()
+        expect(self.page.locator('#question-panel')).to_be_hidden()
+        expect(self.page.locator('#completion-message')).to_contain_text(
+            '30-question experience preview'
+        )
+
+    def test_preview_keeps_responses_off_network_and_out_of_browser_storage(self):
+        origin = urlsplit(self.url)
+        requests, external_requests, write_requests = [], [], []
+        request_payloads, samples = [], []
+
+        def record_request(request):
+            target = urlsplit(request.url)
+            requests.append((request.method, request.url))
+            request_payloads.append(unquote_plus(request.url) + (request.post_data or ''))
+            if target.scheme in ('http', 'https') and (
+                target.scheme, target.netloc
+            ) != (origin.scheme, origin.netloc):
+                external_requests.append(request.url)
+            if request.method not in ('GET', 'HEAD'):
+                write_requests.append((request.method, request.url))
+
+        def assert_no_saved_responses():
+            self.assertEqual(self.page.evaluate('''() => ({
+                local: localStorage.length,
+                session: sessionStorage.length
+            })'''), {'local': 0, 'session': 0})
+            self.assertEqual(self.context.cookies(), [])
+
+        def type_sample(text):
+            samples.append(text)
+            self.page.locator('#reflection').fill(text)
+            assert_no_saved_responses()
+
+        self.page.on('request', record_request)
+        self.page.reload()
+        expect(self.page.locator('#welcome')).to_be_visible()
+        self.assertIn(('GET', self.url), requests, 'Initial document load must be observed')
+        assert_no_saved_responses()
+        self.navigate('The Journey')
+        type_sample('Privacy full sample')
+        self.page.locator('#next').click()
+        expect(self.page.locator('#reflection')).to_have_value('')
+        type_sample('Privacy mode switch sample')
+        self.page.locator('#quick-mode').click()
+        expect(self.page.locator('#reflection')).to_have_value('')
+        type_sample('Privacy quick sample')
+        self.page.locator('#next').click()
+        expect(self.page.locator('#reflection')).to_have_value('')
+        type_sample('Privacy full return sample')
+        self.page.locator('#full-mode').click()
+        expect(self.page.locator('#reflection')).to_have_value('')
+        type_sample('Privacy view navigation sample')
+        self.navigate('Welcome')
+        self.navigate('The Journey')
+        expect(self.page.locator('#reflection')).to_have_value('')
+        type_sample('Privacy reload sample')
+        self.page.reload()
+        expect(self.page.locator('#welcome')).to_be_visible()
+        self.navigate('The Journey')
+        expect(self.page.locator('#reflection')).to_have_value('')
+        expect(self.page.locator('#word-hint')).to_have_text(
+            '0 words typed · No minimum or maximum'
+        )
+        assert_no_saved_responses()
+        self.assertEqual(external_requests, [])
+        self.assertEqual(write_requests, [])
+        allowed_urls = {self.url, self.url + 'favicon.ico'}
+        self.assertEqual([
+            request for request in requests if request[1] not in allowed_urls
+        ], [], 'This standalone preview must not make additional requests or send query data')
+        self.assertFalse(any(
+            sample in payload for sample in samples for payload in request_payloads
+        ), 'Sample text must not be transmitted in request URLs or bodies')
 
 
 if __name__ == '__main__':

@@ -73,6 +73,9 @@ The tests start their own temporary HTTP server and browser. They check chapter
 and completion transitions, sample-text clearing, mobile keyboard focus,
 accessible descriptions, unsupported speech, and cancellation of queued and
 automatic reading, plus numbered question navigation and completion actions.
+They traverse all 30 questions and four chapter pauses, exercise native browser
+Back/Forward, and check that typing and navigation create no response requests,
+browser storage, or cookies.
 Speech scheduling tests use a controlled browser speech
 stub; they do not verify audible playback.
 
@@ -81,7 +84,7 @@ path, otherwise system `chromium`/`chromium-browser` when available, otherwise
 Playwright's installed Chromium. Invalid overrides fail with an explanation.
 The HTTP server and browser are cleaned up even when startup fails.
 
-The Browser checks GitHub Actions workflow runs the same suite on Windows and
-Linux for pushes to `main` and `codex/**` branches and for pull requests. It selects
+The Browser checks GitHub Actions workflow runs the same suite on Windows Server
+2022 and Ubuntu 24.04 for pushes to `main` and `codex/**` branches and for pull requests. It selects
 Playwright's installed Chromium explicitly. The workflow only tests the preview;
 it does not deploy or publish it.
